@@ -1,0 +1,54 @@
+[
+  {
+    "case_id": "happy_path_to_review",
+    "category": "workflow",
+    "description": "诊断和创意输出合格，工作流暂停并等待人工审核。",
+    "fake_model_profile": "valid",
+    "expected": {"next": "human_review_gate", "quality_passed": true}
+  },
+  {
+    "case_id": "quality_revision_once",
+    "category": "quality",
+    "description": "首轮创意角度重复，质量 Agent 触发一次返修后通过。",
+    "fake_model_profile": "duplicate_then_valid",
+    "expected": {"revision_count": 1, "quality_passed": true}
+  },
+  {
+    "case_id": "quality_still_fails_after_limit",
+    "category": "quality",
+    "description": "返修后仍不合格，但达到上限后交由人工决定，不继续循环。",
+    "fake_model_profile": "always_duplicate",
+    "expected": {"revision_count": 1, "next": "human_review_gate"}
+  },
+  {
+    "case_id": "human_approve",
+    "category": "human_review",
+    "description": "人工直接通过草稿，运行完成并进入幂等落库节点。",
+    "fake_model_profile": "valid",
+    "resume_decision": "approve",
+    "expected": {"final_status": "completed"}
+  },
+  {
+    "case_id": "human_edit_and_approve",
+    "category": "human_review",
+    "description": "人工编辑完整结构化草稿后通过，最终采用编辑版本。",
+    "fake_model_profile": "valid",
+    "resume_decision": "edit_and_approve",
+    "expected": {"final_status": "completed", "uses_edited_output": true}
+  },
+  {
+    "case_id": "human_reject",
+    "category": "human_review",
+    "description": "人工驳回草稿，不创建诊断或创意业务成果。",
+    "fake_model_profile": "valid",
+    "resume_decision": "reject",
+    "expected": {"final_status": "rejected", "persists_draft": false}
+  },
+  {
+    "case_id": "policy_and_redaction",
+    "category": "policy",
+    "description": "越权工具调用被拒绝，密钥字段被脱敏，用量字段保留。",
+    "fake_model_profile": "not_used",
+    "expected": {"tool_denied": true, "secrets_redacted": true}
+  }
+]

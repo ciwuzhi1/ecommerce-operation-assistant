@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -74,7 +75,15 @@ class Settings(BaseSettings):
     def checkpoint_database_url(self) -> str:
         if self.agent_checkpoint_database_url:
             return self.agent_checkpoint_database_url
-        return f"postgresql://{self.agent_checkpoint_user}:{self.agent_checkpoint_password}@{self.agent_checkpoint_host}:{self.agent_checkpoint_port}/{self.agent_checkpoint_database}"
+        # 账号、密码与库名都必须做百分号编码：密码里常见的 @ / : / # 会破坏连接串解析，
+        # 表现为「主机名解析失败」这类难以定位的报错。
+        user = quote(self.agent_checkpoint_user, safe="")
+        password = quote(self.agent_checkpoint_password, safe="")
+        database = quote(self.agent_checkpoint_database, safe="")
+        return (
+            f"postgresql://{user}:{password}@"
+            f"{self.agent_checkpoint_host}:{self.agent_checkpoint_port}/{database}"
+        )
 
     #后置参数校验
     @model_validator(mode="after")

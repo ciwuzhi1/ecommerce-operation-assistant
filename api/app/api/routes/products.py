@@ -74,6 +74,12 @@ from app.schemas import (
 )
 from app.services.ad_experiment_stats import build_ad_experiment_dashboard
 from app.services.competitor_monitoring import next_check_time, run_competitor_monitor
+from app.services.generation_jobs import (
+    cancel_generation_job_record,
+    dispatch_generation_job,
+    enqueue_generation_job,
+    retry_generation_job_record,
+)
 from app.services.generated_assets import sync_generated_assets_from_creative_plans
 from app.services.inventory import InventoryAdjustmentError, adjust_inventory, create_inventory_item_for_sku
 from app.services.link_extraction import LinkExtractionError, fetch_competitor_profile
@@ -83,7 +89,11 @@ from app.services.promotion_links import (
     make_short_code,
 )
 from app.services.public_link_parse_tasks import enqueue_competitor_import_task, run_public_link_parse_task
-from app.services.review import enrich_performance_metrics
+from app.services.ad_experiments import build_ad_experiment_payload
+from app.services.ad_recommendations import generate_ad_recommendation as build_ad_recommendation
+from app.services.creative_plans import generate_main_image_plans, generate_video_script_plans
+from app.services.diagnosis import generate_product_diagnosis as build_product_diagnosis
+from app.services.review import enrich_performance_metrics, generate_review as build_review_report
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -770,7 +780,26 @@ def generate_creative_plan_image(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> GenerationJob:
-    raise HTTPException(status_code=501, detail="该功能尚未接入，正在开发中。")
+    """处理生成创意方案图片接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    creative_plan = db.get(CreativePlan, creative_plan_id)
+    if creative_plan is None or creative_plan.product_id != product_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Creative plan not found")
+    if creative_plan.type != CreativePlanType.MAIN_IMAGE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Creative plan is not a main image plan")
+
+    job = enqueue_generation_job(
+        db,
+        product_id=product_id,
+        creative_plan_id=creative_plan_id,
+        kind=GenerationJobKind.MAIN_IMAGE_ASSET,
+    )
+    db.commit()
+    db.refresh(job)
+    # 接口返回 202 和任务记录，实际素材生成异步执行，用户可在工作台中等待、取消或重试。
+    dispatch_generation_job(job.id, background_tasks)
+    return job
 
 
 @router.post(
@@ -785,7 +814,25 @@ def generate_creative_plan_video(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> GenerationJob:
-    raise HTTPException(status_code=501, detail="该功能尚未接入，正在开发中。")
+    """处理生成创意方案视频接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    creative_plan = db.get(CreativePlan, creative_plan_id)
+    if creative_plan is None or creative_plan.product_id != product_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Creative plan not found")
+    if creative_plan.type != CreativePlanType.VIDEO_SCRIPT:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Creative plan is not a video script")
+
+    job = enqueue_generation_job(
+        db,
+        product_id=product_id,
+        creative_plan_id=creative_plan_id,
+        kind=GenerationJobKind.VIDEO_ASSET,
+    )
+    db.commit()
+    db.refresh(job)
+    dispatch_generation_job(job.id, background_tasks)
+    return job
 
 
 @router.post(
@@ -800,7 +847,23 @@ def retry_generation_job(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> GenerationJob:
-    raise HTTPException(status_code=501, detail="该功能尚未接入，正在开发中。")
+    """处理重试生成任务任务接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    job = db.get(GenerationJob, job_id)
+    if job is None or job.product_id != product_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation job not found")
+    if job.status in {GenerationJobStatus.PENDING, GenerationJobStatus.RUNNING}:
+        # 已在队列或执行中的任务保持幂等返回，避免用户重复点击造成多条生成请求。
+        return job
+    if job.status != GenerationJobStatus.FAILED:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only failed jobs can be retried")
+
+    retry_generation_job_record(job)
+    db.commit()
+    db.refresh(job)
+    dispatch_generation_job(job.id, background_tasks)
+    return job
 
 
 @router.post(
@@ -813,7 +876,17 @@ def cancel_generation_job(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> GenerationJob:
-    raise HTTPException(status_code=501, detail="该功能尚未接入，正在开发中。")
+    """处理取消生成任务任务接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    job = db.get(GenerationJob, job_id)
+    if job is None or job.product_id != product_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation job not found")
+    if not cancel_generation_job_record(job, reason="用户取消生成任务。"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only pending or running jobs can be cancelled")
+    db.commit()
+    db.refresh(job)
+    return job
 
 
 @router.post(
@@ -826,7 +899,39 @@ def generate_main_image_creative_plans(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> list[CreativePlan]:
-    raise HTTPException(status_code=501, detail="该功能尚未接入，正在开发中。")
+    """处理生成主流程图片创意plans接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    statement = (
+        select(Product)
+        .where(Product.id == product_id)
+        .options(
+            selectinload(Product.competitors),
+            selectinload(Product.diagnoses),
+        )
+    )
+    product = db.scalars(statement).first()
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+    latest_diagnosis = product.diagnoses[0] if product.diagnoses else None
+    plan_payloads = generate_main_image_plans(product, latest_diagnosis)
+    creative_plans = [
+        CreativePlan(
+            product_id=product_id,
+            type=CreativePlanType.MAIN_IMAGE,
+            title=payload["title"],
+            content=payload,
+            rationale=payload["angle"],
+        )
+        for payload in plan_payloads
+    ]
+
+    db.add_all(creative_plans)
+    db.commit()
+    for creative_plan in creative_plans:
+        db.refresh(creative_plan)
+    return creative_plans
 
 
 @router.post(
@@ -839,7 +944,39 @@ def generate_video_script_creative_plans(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> list[CreativePlan]:
-    raise HTTPException(status_code=501, detail="该功能尚未接入，正在开发中。")
+    """处理生成视频script创意plans接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    statement = (
+        select(Product)
+        .where(Product.id == product_id)
+        .options(
+            selectinload(Product.competitors),
+            selectinload(Product.diagnoses),
+        )
+    )
+    product = db.scalars(statement).first()
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+    latest_diagnosis = product.diagnoses[0] if product.diagnoses else None
+    plan_payloads = generate_video_script_plans(product, latest_diagnosis)
+    creative_plans = [
+        CreativePlan(
+            product_id=product_id,
+            type=CreativePlanType.VIDEO_SCRIPT,
+            title=payload["title"],
+            content=payload,
+            rationale=payload["angle"],
+        )
+        for payload in plan_payloads
+    ]
+
+    db.add_all(creative_plans)
+    db.commit()
+    for creative_plan in creative_plans:
+        db.refresh(creative_plan)
+    return creative_plans
 
 
 @router.post(
@@ -998,7 +1135,28 @@ def generate_ad_recommendation(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> AdRecommendation:
-    raise HTTPException(status_code=501, detail="该功能尚未接入，正在开发中。")
+    """处理生成投放建议接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    product = db.scalars(
+        select(Product)
+        .where(Product.id == product_id)
+        .options(
+            selectinload(Product.creative_plans),
+            selectinload(Product.performance_records),
+            selectinload(Product.diagnoses),
+        )
+    ).first()
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+    # 这里仅生成可编辑的投放建议记录，不对接广告平台，也不自动调整预算。
+    payload = build_ad_recommendation(product)
+    recommendation = AdRecommendation(product_id=product_id, **payload)
+    db.add(recommendation)
+    db.commit()
+    db.refresh(recommendation)
+    return recommendation
 
 
 @router.patch(
@@ -1063,7 +1221,28 @@ def generate_ad_experiment(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> AdExperiment:
-    raise HTTPException(status_code=501, detail="该功能尚未接入，正在开发中。")
+    """处理生成投放实验接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    product = db.scalars(
+        select(Product)
+        .where(Product.id == product_id)
+        .options(
+            selectinload(Product.generated_assets),
+            selectinload(Product.promotion_links),
+            selectinload(Product.performance_records),
+        )
+    ).first()
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+    # 自动生成的实验保持 draft 状态，只是帮运营准备计划草稿，不会创建真实广告计划。
+    payload = build_ad_experiment_payload(product)
+    experiment = AdExperiment(product_id=product_id, **payload)
+    db.add(experiment)
+    db.commit()
+    db.refresh(experiment)
+    return experiment
 
 
 @router.patch(
@@ -1177,7 +1356,39 @@ def generate_review_report(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> ReviewReport:
-    raise HTTPException(status_code=501, detail="该功能尚未接入，正在开发中。")
+    """处理生成审核report接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    statement = (
+        select(Product)
+        .where(Product.id == product_id)
+        .options(
+            selectinload(Product.performance_records).selectinload(
+                PerformanceRecord.creative_plan
+            ),
+            selectinload(Product.performance_records).selectinload(
+                PerformanceRecord.ad_experiment
+            ),
+            selectinload(Product.performance_records).selectinload(
+                PerformanceRecord.promotion_link
+            ),
+            selectinload(Product.diagnoses),
+        )
+    )
+    product = db.scalars(statement).first()
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+    try:
+        review_payload = build_review_report(product)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    review_report = ReviewReport(product_id=product_id, **review_payload)
+    db.add(review_report)
+    db.commit()
+    db.refresh(review_report)
+    return review_report
 
 
 @router.post(
@@ -1190,7 +1401,24 @@ def generate_product_diagnosis(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> ProductDiagnosis:
-    raise HTTPException(status_code=501, detail="该功能尚未接入，正在开发中。")
+    """处理生成商品商品诊断接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    statement = (
+        select(Product)
+        .where(Product.id == product_id)
+        .options(selectinload(Product.competitors))
+    )
+    product = db.scalars(statement).first()
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+    diagnosis_payload = build_product_diagnosis(product)
+    diagnosis = ProductDiagnosis(product_id=product_id, **diagnosis_payload)
+    db.add(diagnosis)
+    db.commit()
+    db.refresh(diagnosis)
+    return diagnosis
 
 
 @router.patch(

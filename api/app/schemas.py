@@ -1041,3 +1041,280 @@ class PerformanceImportResult(BaseModel):
     created_count: int
     error_count: int
     rows: list[PerformanceImportRowResult]
+
+
+from app.agents.contracts import AgentDraftOutput, ReviewResumePayload
+
+
+class AgentRunReviewCreate(ReviewResumePayload):
+    pass
+
+
+class AgentRunEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    event_type: str
+    agent_name: str | None = None
+    operation_name: str | None = None
+    status: str | None = None
+    message: str | None = None
+    input_snapshot: dict[str, Any] = Field(default_factory=dict)
+    output_snapshot: dict[str, Any] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = None
+    span_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentRunReviewRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    reviewed_by_user_id: int
+    decision: AgentReviewDecision
+    edited_output: dict[str, Any] = Field(default_factory=dict)
+    note: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    thread_id: str
+    workspace_id: int | None = None
+    task_id: int | None = None
+    product_id: int | None = None
+    requested_by_user_id: int
+    workflow_key: str
+    workflow_version: str
+    attempt: int = 1
+    queue_name: str | None = None
+    status: AgentRunStatus
+    current_agent: str | None = None
+    revision_count: int
+    max_revisions: int
+    budget: dict[str, Any] = Field(default_factory=dict)
+    usage: dict[str, Any] = Field(default_factory=dict)
+    version_manifest: dict[str, Any] = Field(default_factory=dict)
+    context_snapshot: dict[str, Any] = Field(default_factory=dict)
+    draft_output: dict[str, Any] = Field(default_factory=dict)
+    quality_report: dict[str, Any] = Field(default_factory=dict)
+    final_output: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    timeout_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    events: list[AgentRunEventRead] = Field(default_factory=list)
+    reviews: list[AgentRunReviewRead] = Field(default_factory=list)
+
+
+class AgentRunDraftRead(BaseModel):
+    draft_output: AgentDraftOutput
+
+
+class AgentDefinitionRead(BaseModel):
+    key: str
+    version: str
+    description: str
+    tools: list[str] = Field(default_factory=list)
+
+
+class ToolDefinitionRead(BaseModel):
+    key: str
+    risk_level: AgentRiskLevel
+    description: str
+    # 是否有可执行适配：前端据此区分「已可用」与「仅登记未接入」
+    executable: bool
+
+
+class AgentCatalogRead(BaseModel):
+    coordinator: AgentDefinitionRead
+    agents: list[AgentDefinitionRead]
+    tools: list[ToolDefinitionRead] = Field(default_factory=list)
+    workflows: list[WorkflowDefinitionRead]
+
+
+class AgentConversationCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    context_scope: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentConversationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    workspace_id: int
+    created_by_user_id: int
+    title: str
+    status: str
+    context_scope: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentConversationMessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=12000)
+    structured_content: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentConversationMessageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    conversation_id: int
+    workspace_id: int
+    author_user_id: int | None = None
+    role: str
+    content: str
+    structured_content: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentTaskCreate(BaseModel):
+    workflow_key: str | None = Field(default=None, max_length=100)
+    intent: str | None = Field(default=None, max_length=4000)
+    title: str | None = Field(default=None, max_length=255)
+    conversation_id: int | None = Field(default=None, gt=0)
+    context_scope: dict[str, Any] = Field(default_factory=dict)
+    input_payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("context_scope", "input_payload")
+    @classmethod
+    def validate_payload_size(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """校验载荷size，把配置或输入约束收敛为下游可直接使用的稳定数据。"""
+        return _bounded_agent_json(value)
+
+    @model_validator(mode="after")
+    def validate_workflow_or_intent(self) -> "AgentTaskCreate":
+        """校验工作流orintent，把配置或输入约束收敛为下游可直接使用的稳定数据。"""
+        if not self.workflow_key and not (self.intent and self.intent.strip()):
+            raise ValueError("workflow_key or intent is required")
+        return self
+
+
+class AgentTaskRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    workspace_id: int
+    conversation_id: int | None = None
+    requested_by_user_id: int
+    workflow_key: str
+    workflow_version: str
+    title: str
+    intent: str | None = None
+    status: AgentTaskStatus
+    risk_level: AgentRiskLevel
+    context_scope: dict[str, Any] = Field(default_factory=dict)
+    input_payload: dict[str, Any] = Field(default_factory=dict)
+    result_summary: dict[str, Any] = Field(default_factory=dict)
+    version_manifest: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    cancelled_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentApprovalDecisionCreate(BaseModel):
+    decision: Literal["approve", "edit_and_approve", "reject"]
+    note: str | None = Field(default=None, max_length=1000)
+    edited_output: dict[str, Any] | None = None
+    decision_payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("decision_payload", "edited_output")
+    @classmethod
+    def validate_payload_size(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """校验载荷size，把配置或输入约束收敛为下游可直接使用的稳定数据。"""
+        if value is None:
+            return None
+        return _bounded_agent_json(value, max_bytes=256 * 1024)
+
+    @model_validator(mode="after")
+    def validate_edited_output(self) -> "AgentApprovalDecisionCreate":
+        """「修改后通过」必须带完整结果，其余决策不得携带（DesignSpec §6 API-07）。"""
+        if self.decision == "edit_and_approve":
+            if not self.edited_output:
+                raise ValueError("edit_and_approve requires a non-empty edited_output")
+        elif self.edited_output is not None:
+            raise ValueError("edited_output is only allowed for edit_and_approve")
+        return self
+
+
+class AgentApprovalRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    workspace_id: int
+    task_id: int
+    run_id: int
+    requested_by_user_id: int
+    decided_by_user_id: int | None = None
+    action_key: str
+    risk_level: AgentRiskLevel
+    status: AgentApprovalStatus
+    request_payload: dict[str, Any] = Field(default_factory=dict)
+    decision_payload: dict[str, Any] = Field(default_factory=dict)
+    note: str | None = None
+    expires_at: datetime | None = None
+    decided_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentMemoryCreate(BaseModel):
+    scope_type: Literal["workspace", "store", "product", "user"]
+    scope_id: str | None = Field(default=None, max_length=120)
+    memory_key: str = Field(min_length=1, max_length=120)
+    schema_version: str = Field(default="1.0", min_length=1, max_length=30)
+    content: dict[str, Any]
+    source_type: Literal["user_confirmed", "approved_task", "import"]
+    source_reference: dict[str, Any] = Field(default_factory=dict)
+    effective_at: datetime | None = None
+    expires_at: datetime | None = None
+
+    @field_validator("content", "source_reference")
+    @classmethod
+    def validate_payload_size(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """校验载荷size，把配置或输入约束收敛为下游可直接使用的稳定数据。"""
+        return _bounded_agent_json(value)
+
+    @model_validator(mode="after")
+    def validate_effective_window(self) -> "AgentMemoryCreate":
+        """校验生效window，把配置或输入约束收敛为下游可直接使用的稳定数据。"""
+        # 先处理输入与边界条件，再执行核心逻辑，最后返回稳定且可验证的结果。
+        if self.expires_at is not None and self.effective_at is not None:
+            if self.expires_at <= self.effective_at:
+                raise ValueError("expires_at must be later than effective_at")
+        return self
+
+
+class AgentMemoryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    workspace_id: int
+    created_by_user_id: int
+    scope_type: str
+    scope_id: str | None = None
+    memory_key: str
+    schema_version: str
+    content: dict[str, Any]
+    source_type: str
+    source_reference: dict[str, Any] = Field(default_factory=dict)
+    status: AgentMemoryStatus
+    effective_at: datetime | None = None
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime

@@ -1,0 +1,79 @@
+name: ecommerce-operation-assistant
+
+# =============================================================================
+# 电商运营助手 · 开发环境基础服务
+#
+# 只起「应用之外」的中间件，供本机直接跑 uvicorn / celery 时连接。
+# 生产/一体化交付用仓库根目录的 docker-compose.yml（含 api / worker / web）。
+#
+# 与同机的 etl_agent_demo（compose 项目名 seatunnel-etl-agent）共存约定：
+#
+#   Redis        共用 6379。两个项目的连接串都是「无密码」形式
+#                （本项目 redis://127.0.0.1:6379/0；对方 redis://localhost:6379/0），
+#                因此同机只需要一个 Redis 实例，谁先起谁持有，另一个直接复用。
+#                注意：因此这里刻意不设 requirepass —— 一旦设了密码，
+#                对方的无密码连接会收到 "ERR Client sent AUTH, but no password is set"。
+#                两个项目的键空间用 db 区分（都用 db 0，但键前缀不同）。
+#
+#   PostgreSQL   错开端口。对方占 5432（库 etl_checkpoint），本项目用 5433
+#                （库 agent_checkpoints）。两者互不干扰，可同时运行。
+#
+#   容器名       由 compose 项目名派生，天然可区分：
+#                  ecommerce-operation-assistant-redis-1
+#                  ecommerce-operation-assistant-agent-checkpoints-1
+#                对比对方的 seatunnel-etl-agent-redis-1 / -postgres-1。
+#
+# 数据卷       ecommerce-operation-assistant_checkpoint-data，与对方卷完全隔离。
+#
+# 启动：docker compose -f infra/compose.yaml up -d
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # 队列 Redis 7 —— 与 etl_agent_demo 共用 6379，故不设密码（见文件头说明）
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce-operation-assistant-redis
+    restart: unless-stopped
+    # 队列与缓存允许丢失、可重投（DesignSpec §1）；「有任务必有投递」由
+    # Outbox + 幂等键保证，不依赖 Redis 持久化，故不挂数据卷。
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      # 只绑回环，避免同网段其他机器直接连上无密码实例。
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # 智能体断点状态库 PostgreSQL 16 —— 独立实例端口 5433，与 etl_agent_demo 隔离
+  # 库名固定 agent_checkpoints（DesignSpec §4：必须使用独立数据库名）。
+  # ---------------------------------------------------------------------------
+  agent-checkpoints:
+    image: postgres:16-alpine
+    container_name: ecommerce-operation-assistant-agent-checkpoints
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agent
+      # 与 api/.env 的 AGENT_CHECKPOINT_PASSWORD 保持一致，避免改项目密钥文件。
+      # 注意该值含 @：连接串拼装处已做百分号编码（app/core/config.py）。
+      POSTGRES_PASSWORD: "local-agent@checkpoint"
+      POSTGRES_DB: agent_checkpoints
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - checkpoint-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U agent -d agent_checkpoints"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  # 卷名派生为 ecommerce-operation-assistant_checkpoint-data，与对方卷不重名。
+  checkpoint-data:

@@ -1,50 +1,297 @@
 name: ecommerce-operation-assistant
 
+# =============================================================================
+# 电商运营助手 · 容器化交付编排
+#
+# 对应设计：DesignSpec §4「部署拓扑」；实现任务 T-38（六服务编排、健康检查、
+# 启动顺序）、T-39（配置注入）。配套排查文档见 docs/容器化交付与故障排查.md。
+#
+# 七个 service，三层启动顺序（全部由 healthcheck 驱动，不靠 sleep 猜时间）：
+#   基础层  mysql / redis / agent-checkpoints
+#   应用层  api             —— 先 alembic upgrade head，再起 uvicorn
+#   工作层  worker / web    —— 等 api 健康（= 迁移已跑完）后才启动
+#
+# 三个命名卷：
+#   mysql-data        业务库数据
+#   checkpoint-data   智能体断点状态库数据（PostgreSQL）
+#   api-uploads       上传素材与生成产物，api 与 worker 共享同一份
+#
+# 密钥策略：所有密钥只经环境变量注入 —— Compose 从根目录 .env 读取并映射进容器，
+#   任何密钥都不写进镜像层（见 api/.dockerignore、web/.dockerignore）。
+#   本文件里 `${VAR:-...}` 的默认值全部是「占位值」，与根 .env.example 一致；
+#   APP_ENV 默认 production，而应用启动时会校验密钥强度，占位值会被直接拒绝启动
+#   （见 api/app/core/config.py::validate_production_secrets），因此不可能带弱密钥上线。
+#
+# 中国大陆网络：基础镜像一律用原始名称，由 Docker daemon 的 registry-mirrors 解析
+#   （不要在编排里硬编码某个第三方加速站：加速站会失效，硬编码会让拉取直接卡死）。
+#   需要指定上游地址时用环境变量覆盖，如 MYSQL_IMAGE=mysql:8.4。
+#   Python / npm 依赖已在 Dockerfile 内指向国内镜像源。
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 构建参数：api 与 worker 共用同一份镜像构建定义
+# ---------------------------------------------------------------------------
+x-api-build: &api-build
+  context: ./api
+  dockerfile: Dockerfile
+  args:
+    PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
+    UV_IMAGE: ${UV_IMAGE:-astral-sh/uv:0.12.8}
+    PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+
+# ---------------------------------------------------------------------------
+# 应用环境变量：api 与 worker 必须完全一致，否则队列路由与检查点连接会漂移
+# ---------------------------------------------------------------------------
+x-api-environment: &api-environment
+  # ---- 业务库（MySQL 8.4）与队列（Redis 7）----
+  DATABASE_URL: mysql+pymysql://root:${MYSQL_ROOT_PASSWORD:-replace_with_random_urlsafe_32_char_secret}@mysql:3306/${MYSQL_DATABASE:-ecommerce_operation}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-replace_with_random_urlsafe_32_char_secret}@redis:6379/0
+  TASK_QUEUE_BACKEND: celery
+  CELERY_TASK_DEFAULT_QUEUE: ${CELERY_TASK_DEFAULT_QUEUE:-generation}
+  CELERY_AGENT_QUEUE: ${CELERY_AGENT_QUEUE:-agent}
+  CELERY_AGENT_WORKFLOW_QUEUE: ${CELERY_AGENT_WORKFLOW_QUEUE:-agent.workflow}
+  CELERY_MAINTENANCE_QUEUE: ${CELERY_MAINTENANCE_QUEUE:-maintenance}
+  # ---- 智能体断点状态（PostgreSQL 16）----
+  # 留空则按下面的 HOST/PORT/USER/PASSWORD/DATABASE 拼装；托管库可用整串 DSN 覆盖。
+  AGENT_CHECKPOINT_DATABASE_URL: "${AGENT_CHECKPOINT_DATABASE_URL:-}"
+  AGENT_CHECKPOINT_HOST: agent-checkpoints
+  AGENT_CHECKPOINT_PORT: "5432"
+  AGENT_CHECKPOINT_USER: ${AGENT_POSTGRES_USER:-agent}
+  AGENT_CHECKPOINT_PASSWORD: ${AGENT_POSTGRES_PASSWORD:-replace_with_random_32_char_secret}
+  AGENT_CHECKPOINT_DATABASE: ${AGENT_POSTGRES_DATABASE:-agent_checkpoints}
+  # ---- 智能体额度与返修上限 ----
+  AGENT_MAX_TOTAL_TOKENS: ${AGENT_MAX_TOTAL_TOKENS:-12000}
+  AGENT_MAX_REVISIONS: ${AGENT_MAX_REVISIONS:-1}
+  # ---- 应用与安全 ----
+  APP_ENV: ${APP_ENV:-production}
+  AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:-replace_with_random_urlsafe_32_char_secret}
+  AUTH_TOKEN_EXPIRE_MINUTES: ${AUTH_TOKEN_EXPIRE_MINUTES:-10080}
+  API_CORS_ORIGINS: ${API_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+  # ---- 可观测（OpenTelemetry，留空即关闭导出）----
+  OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+  # ---- 文本模型（OpenAI 兼容；本期可不接入，留空走规则回退）----
+  LLM_BASE_URL: "${LLM_BASE_URL:-}"
+  LLM_API_KEY: "${LLM_API_KEY:-}"
+  LLM_MODEL: "${LLM_MODEL:-}"
+  # ---- 图片生成（即梦；AK:SK 组合用冒号分隔，故整体加引号）----
+  IMAGE_PROVIDER: "${IMAGE_PROVIDER:-}"
+  IMAGE_BASE_URL: "${IMAGE_BASE_URL:-}"
+  IMAGE_API_KEY: "${IMAGE_API_KEY:-}"
+  IMAGE_MODEL: "${IMAGE_MODEL:-}"
+  IMAGE_SIZE: "${IMAGE_SIZE:-1024*1024}"
+  IMAGE_WORKSPACE_ID: "${IMAGE_WORKSPACE_ID:-}"
+  IMAGE_POLL_INTERVAL_SECONDS: ${IMAGE_POLL_INTERVAL_SECONDS:-5}
+  IMAGE_POLL_MAX_ATTEMPTS: ${IMAGE_POLL_MAX_ATTEMPTS:-24}
+  # ---- 视频生成（即梦；合法时长只有 5 秒与 10 秒）----
+  VIDEO_PROVIDER: "${VIDEO_PROVIDER:-}"
+  VIDEO_BASE_URL: "${VIDEO_BASE_URL:-}"
+  VIDEO_API_KEY: "${VIDEO_API_KEY:-}"
+  VIDEO_MODEL: "${VIDEO_MODEL:-}"
+  VIDEO_SIZE: "${VIDEO_SIZE:-1280*720}"
+  VIDEO_DURATION: ${VIDEO_DURATION:-5}
+  VIDEO_WORKSPACE_ID: "${VIDEO_WORKSPACE_ID:-}"
+  VIDEO_POLL_INTERVAL_SECONDS: ${VIDEO_POLL_INTERVAL_SECONDS:-10}
+  VIDEO_POLL_MAX_ATTEMPTS: ${VIDEO_POLL_MAX_ATTEMPTS:-36}
+
+# ---------------------------------------------------------------------------
+# 日志轮转：默认 json-file 不限制大小，长期运行会把磁盘写满
+# ---------------------------------------------------------------------------
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
+  # =========================================================================
+  # 基础层 · 业务库 MySQL 8.4
+  # =========================================================================
   mysql:
-    image: mysql:8.4
+    image: ${MYSQL_IMAGE:-mysql:8.4}
+    restart: unless-stopped
+    logging: *default-logging
     environment:
-      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}"
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-replace_with_random_urlsafe_32_char_secret}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-ecommerce_operation}
+    # 只绑定回环地址：生产环境不需要从公网访问数据库，仅供宿主侧排查与开发复用。
     ports:
       - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}"]
+      # 用容器内环境变量取密码，避免密码被写进 compose 展开后的命令行文本。
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 12
+      start_period: 30s
 
+  # =========================================================================
+  # 基础层 · 队列 Redis 7
+  # =========================================================================
   redis:
-    image: redis:7-alpine
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    restart: unless-stopped
+    logging: *default-logging
     environment:
-      REDIS_PASSWORD: "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
-    command: ["sh", "-c", "exec redis-server --requirepass \"$${REDIS_PASSWORD}\""]
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-replace_with_random_urlsafe_32_char_secret}
+    # 不挂数据卷：Redis 只承担队列与缓存，允许丢失、可重投（DesignSpec §1）。
+    # 「有任务必有投递」由 Outbox + 幂等键保证，不依赖 Redis 持久化。
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\""]
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 12
+      start_period: 15s
 
+  # =========================================================================
+  # 基础层 · 智能体断点状态库 PostgreSQL 16
+  # 独立实例、独立库名 agent_checkpoints，避免与其他项目数据混杂（DesignSpec §4）。
+  # =========================================================================
   agent-checkpoints:
-    image: postgres:16-alpine
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${AGENT_POSTGRES_USER:-agent}
-      POSTGRES_PASSWORD: "${AGENT_POSTGRES_PASSWORD:?Set AGENT_POSTGRES_PASSWORD in .env}"
+      POSTGRES_PASSWORD: ${AGENT_POSTGRES_PASSWORD:-replace_with_random_32_char_secret}
       POSTGRES_DB: ${AGENT_POSTGRES_DATABASE:-agent_checkpoints}
     ports:
       - "127.0.0.1:${AGENT_POSTGRES_PORT:-5433}:5432"
     volumes:
-      - agent-checkpoint-data:/var/lib/postgresql/data
+      - checkpoint-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${AGENT_POSTGRES_USER:-agent} -d ${AGENT_POSTGRES_DATABASE:-agent_checkpoints}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 12
+      start_period: 20s
+
+  # =========================================================================
+  # 应用层 · FastAPI（API 进程）
+  # 启动顺序：基础服务全部 healthy → 本服务跑迁移 → 起 uvicorn → 转 healthy
+  # =========================================================================
+  api:
+    image: ecommerce-operation-assistant-api:latest
+    build: *api-build
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    environment:
+      <<: *api-environment
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-ecommerce-operation-agent-api}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # 与 worker 共享同一份上传素材目录（DesignSpec §4 命名卷 api-uploads）
+      - api-uploads:/app/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      agent-checkpoints:
+        condition: service_healthy
+    # 容器启动时自动执行迁移（DesignSpec §4 环境差异：生产环境迁移自动执行）。
+    # exec 让 uvicorn 接管 PID，保证 SIGTERM 能被正确转发、优雅退出。
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    healthcheck:
+      # /health 由 api/app/api/routes/health.py 提供，200 即视为就绪。
+      # start_period 覆盖首次 alembic upgrade head 建表耗时。
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  # =========================================================================
+  # 工作层 · Celery Worker（四队列 + Beat）
+  # 与 api 同镜像、同环境变量，仅 command 不同；等 api 健康后再启动，
+  # 确保 Worker 消费任务时业务表已经建好。
+  # =========================================================================
+  worker:
+    image: ecommerce-operation-assistant-worker:latest
+    build: *api-build
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    stop_grace_period: 60s
+    environment:
+      <<: *api-environment
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-ecommerce-operation-agent-worker}
+    volumes:
+      - api-uploads:/app/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      agent-checkpoints:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    # -Q 四个队列：素材生成 / 智能体运行 / 智能体工作流 / 维护任务
+    # -B 内嵌 Beat，周期任务（投递派发 5s、运行维护 30s）按 celery_app 的
+    #    beat_schedule 定义走维护队列。
+    # --schedule 指到 /tmp：镜像以非 root 运行，/app 不可写，Beat 默认把
+    #    celerybeat-schedule 写在 CWD 会失败。
+    command:
+      - celery
+      - -A
+      - app.worker.celery_app.celery_app
+      - worker
+      - --loglevel=INFO
+      - -Q
+      - generation,agent,agent.workflow,maintenance
+      - -B
+      - --schedule=/tmp/celerybeat-schedule
+    healthcheck:
+      # Celery 无 HTTP 端点，用 broker 往返的 inspect ping 判定：
+      # 能 ping 通说明「进程存活 + broker 可达」，二者缺一都起不来。
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app.celery_app inspect ping -d \"celery@$$(hostname)\" --timeout 10 | grep -q pong"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  # =========================================================================
+  # 工作层 · Next.js 工作台（含 BFF 代理路由）
+  # =========================================================================
+  web:
+    image: ecommerce-operation-assistant-web:latest
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        # 浏览器侧访问后端的地址，构建期烘焙进客户端包；改了 API_PORT 必须同步改这里。
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8000}
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-slim}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    environment:
+      # BFF（服务端）走 compose 内网直连 api 服务，不经宿主端口，也不受 CORS 影响。
+      API_INTERNAL_BASE_URL: http://api:8000
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8000}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
 volumes:
   mysql-data:
-  agent-checkpoint-data:
+  # 断点状态库数据卷；若从旧编排（卷名 agent-checkpoint-data）迁移，
+  # 见 docs/容器化交付与故障排查.md 的卷迁移步骤，不要直接删卷。
+  checkpoint-data:
+  api-uploads:

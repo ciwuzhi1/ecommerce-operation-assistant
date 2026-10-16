@@ -115,6 +115,40 @@ def test_store_inventory_movements_include_product_and_sku_context() -> None:
     assert payload[0]["quantity_delta"] == -2
 
 
+def test_store_inventory_advice_uses_rule_fallback_for_low_stock() -> None:
+    """验证“店铺库存建议usesrulefallbackforlow库存”场景，确保重构后仍满足预期业务与安全边界。"""
+    # 按 Arrange、Act、Assert 组织场景，重点检查可观察状态和副作用。
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    store_id = _seed_low_stock_store(engine)
+
+    app.dependency_overrides[get_db] = _override_db(engine)
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id=1,
+        email="operator@example.com",
+        display_name="Operator",
+        role=UserRole.OPERATOR,
+    )
+    try:
+        response = TestClient(app).post(
+            f"/api/v1/stores/{store_id}/inventory-advice",
+            headers={"Authorization": "Bearer test"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] in {"rules", "llm"}
+    assert payload["summary"]
+    assert payload["risks"]
+    assert payload["replenishment_actions"]
+
+
 def test_viewer_cannot_generate_store_inventory_advice() -> None:
     """验证“viewercannot生成店铺库存建议”场景，确保重构后仍满足预期业务与安全边界。"""
     # 按 Arrange、Act、Assert 组织场景，重点检查可观察状态和副作用。

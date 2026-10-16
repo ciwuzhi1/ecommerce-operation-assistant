@@ -12,12 +12,15 @@ import {
   Play,
   ShieldCheck,
   Sparkles,
+  Trash2,
   XCircle,
 } from "lucide-react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { AgentTaskAutoRefresh } from "@/components/agent-task-auto-refresh";
+import { ApprovalChangePreview } from "@/components/approval-change-preview";
+import { ApprovalCountdown } from "@/components/approval-countdown";
 import {
   AgentApiError,
   getAgentApprovals,
@@ -29,6 +32,7 @@ import {
   getWorkspaceProducts,
   getWorkspaceStores,
 } from "@/lib/api";
+import { describeAgentErrorCode } from "@/lib/agent-error";
 import { getActiveWorkspaceId, getAuthToken } from "@/lib/session";
 import type { AgentRiskLevel, AgentTaskStatus } from "@/types";
 
@@ -276,9 +280,15 @@ export default async function AgentCenter({ searchParams }: AgentCenterProps) {
           <div className="mt-5 space-y-3">
             {approvals.length === 0 ? <EmptyText text="当前没有待审批动作。" /> : approvals.map((approval) => (
               <div key={approval.id} className="rounded-md border border-amber-200 bg-white p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-medium">任务 #{approval.task_id} · {approval.action_key}</p><p className="mt-1 text-xs text-slate-500">Run #{approval.run_id} · {formatDate(approval.created_at)}</p></div><span className={`w-fit rounded-md px-2 py-1 text-xs font-semibold ${riskTones[approval.risk_level]}`}>{approval.risk_level}</span></div>
-                <div className="mt-3"><JsonPanel title="审批内容" value={approval.request_payload} /></div>
-                {canEdit ? <div className="mt-4 flex flex-col gap-2"><ApprovalForm approvalId={approval.id} workspaceId={workspaceId} decision="approve" draftOutput={approval.request_payload.draft_output} /><ApprovalForm approvalId={approval.id} workspaceId={workspaceId} decision="reject" /></div> : null}
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-medium">任务 #{approval.task_id} · {actionLabel(approval.action_key)}</p><p className="mt-1 text-xs text-slate-500">Run #{approval.run_id} · 创建于 {formatDate(approval.created_at)}</p></div><span className={`w-fit rounded-md px-2 py-1 text-xs font-semibold ${riskTones[approval.risk_level]}`}>{approval.risk_level}</span></div>
+                <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
+                  <JsonPanel title="审批内容" value={approval.request_payload} />
+                  <ApprovalCountdown expiresAt={approval.expires_at} />
+                </div>
+                {isIrreversibleWrite(approval.action_key, approval.request_payload) ? (
+                  <div className="mt-3"><ApprovalChangePreview requestPayload={approval.request_payload} /></div>
+                ) : null}
+                {canEdit ? <ApprovalDecisionForm approvalId={approval.id} workspaceId={workspaceId} requestPayload={approval.request_payload} /> : null}
               </div>
             ))}
           </div>
@@ -300,7 +310,7 @@ export default async function AgentCenter({ searchParams }: AgentCenterProps) {
           <div className="rounded-md border border-slate-200 bg-white p-5">
             <h2 className="text-lg font-semibold">有效记忆</h2>
             <div className="mt-4 grid gap-3 md:grid-cols-2">
-              {memories.length === 0 ? <EmptyText text="暂无已确认记忆。" /> : memories.map((memory) => <div key={memory.id} className="rounded-md border border-slate-200 p-4"><div className="flex items-center justify-between gap-3"><p className="font-medium">{memory.memory_key}</p><span className="text-xs text-slate-500">{memory.scope_type}:{memory.scope_id ?? workspaceId}</span></div><pre className="mt-3 overflow-auto whitespace-pre-wrap text-xs leading-5 text-slate-600">{JSON.stringify(memory.content, null, 2)}</pre></div>)}
+              {memories.length === 0 ? <EmptyText text="暂无已确认记忆。" /> : memories.map((memory) => <div key={memory.id} className="rounded-md border border-slate-200 p-4"><div className="flex items-center justify-between gap-3"><p className="font-medium">{memory.memory_key}</p><span className="text-xs text-slate-500">{memory.scope_type}:{memory.scope_id ?? workspaceId}</span></div><pre className="mt-3 overflow-auto whitespace-pre-wrap text-xs leading-5 text-slate-600">{JSON.stringify(memory.content, null, 2)}</pre>{canEdit ? <form action={`/agent/memories/${memory.id}/revoke`} method="post" className="mt-3"><input type="hidden" name="workspace_id" value={workspaceId} /><button className="inline-flex h-8 items-center gap-2 rounded-md border border-rose-200 bg-white px-3 text-xs font-medium text-rose-700 hover:bg-rose-50"><Trash2 className="h-3.5 w-3.5" aria-hidden="true" />撤销记忆</button></form> : null}</div>)}
             </div>
           </div>
         </section>
@@ -322,10 +332,79 @@ function ContextSelectors({ products, stores, compact = false, disabled = false 
   return <div className={`grid gap-3 ${compact ? "" : "sm:grid-cols-2"}`}><select name="product_id" disabled={disabled} className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm disabled:bg-slate-100"><option value="">选择商品上下文</option>{products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select><select name="store_id" disabled={disabled} className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm disabled:bg-slate-100"><option value="">选择店铺上下文</option>{stores.map((store) => <option key={store.id} value={store.id}>{store.name}</option>)}</select></div>;
 }
 
-/** 渲染 ApprovalForm 组件，集中展示审批表单所需的数据、状态和操作入口。 */
-function ApprovalForm({ approvalId, workspaceId, decision, draftOutput }: { approvalId: number; workspaceId: number; decision: "approve" | "reject"; draftOutput?: unknown }) {
-  const approve = decision === "approve";
-  return <form action={`/agent/approvals/${approvalId}/decision`} method="post" className="space-y-2"><input type="hidden" name="workspace_id" value={workspaceId} /><input type="hidden" name="decision" value={decision} />{approve ? <textarea name="edited_output" defaultValue={JSON.stringify(draftOutput ?? {}, null, 2)} className="min-h-40 w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs" aria-label="编辑后批准的结构化输出" /> : null}<button className={`inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium ${approve ? "bg-emerald-700 text-white hover:bg-emerald-800" : "border border-rose-200 bg-white text-rose-700 hover:bg-rose-50"}`}>{approve ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> : <XCircle className="h-4 w-4" aria-hidden="true" />}{approve ? "编辑后批准并恢复" : "拒绝"}</button></form>;
+/** 审批决策表单：通过 / 修改后通过（需完整结构化结果）/ 驳回。
+ *
+ * 后端审批接口支持 approve / edit_and_approve / reject 三决策：
+ * 「修改后通过」直接发送 edit_and_approve 并携带 edited_output，
+ * 缺少完整结构化结果时由 BFF 与后端共同拒绝（APPR_EDIT_OUTPUT_REQUIRED）。
+ */
+function ApprovalDecisionForm({ approvalId, workspaceId, requestPayload }: { approvalId: number; workspaceId: number; requestPayload: Record<string, unknown> }) {
+  return (
+    <form action={`/agent/approvals/${approvalId}/decision`} method="post" className="mt-4 space-y-3">
+      <input type="hidden" name="workspace_id" value={workspaceId} />
+      <label className="block">
+        <span className="text-xs font-medium text-slate-600">修改后的完整结构化结果（选择「修改后通过」时必填）</span>
+        <textarea
+          name="edited_output"
+          defaultValue={stringifyDraft(requestPayload.draft_output)}
+          spellCheck={false}
+          className="mt-2 min-h-40 w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs outline-none focus:border-amber-500"
+          aria-label="修改后批准的结构化输出"
+        />
+      </label>
+      <input
+        name="note"
+        placeholder="审批备注（可选）"
+        className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none focus:border-amber-500"
+      />
+      <div className="flex flex-wrap gap-2">
+        <button type="submit" name="decision" value="approve" className="inline-flex h-9 items-center gap-2 rounded-md bg-emerald-700 px-3 text-sm font-medium text-white hover:bg-emerald-800">
+          <CheckCircle2 className="h-4 w-4" aria-hidden="true" />通过
+        </button>
+        <button type="submit" name="decision" value="edit_and_approve" className="inline-flex h-9 items-center gap-2 rounded-md border border-emerald-300 bg-white px-3 text-sm font-medium text-emerald-700 hover:bg-emerald-50">
+          <CheckCircle2 className="h-4 w-4" aria-hidden="true" />修改后通过
+        </button>
+        <button type="submit" name="decision" value="reject" className="inline-flex h-9 items-center gap-2 rounded-md border border-rose-200 bg-white px-3 text-sm font-medium text-rose-700 hover:bg-rose-50">
+          <XCircle className="h-4 w-4" aria-hidden="true" />驳回
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** 不可逆写入类动作：批准前必须展示变更预览（PRD FR-75～FR-77 / M-02）。 */
+const IRREVERSIBLE_ACTIONS = new Set(["inventory.adjust", "artifact.persist", "workflow.accept_result"]);
+
+/** 判断审批是否属于不可逆写入，决定是否展示变更预览。 */
+function isIrreversibleWrite(actionKey: string, requestPayload: Record<string, unknown>) {
+  if (IRREVERSIBLE_ACTIONS.has(actionKey)) {
+    return true;
+  }
+  return (
+    "draft_output" in requestPayload ||
+    "before_quantity" in requestPayload ||
+    "quantity_delta" in requestPayload ||
+    "daily_budget" in requestPayload
+  );
+}
+
+/** 把审批动作键映射为中文标签。 */
+function actionLabel(actionKey: string) {
+  const labels: Record<string, string> = {
+    "inventory.adjust": "库存调整",
+    "artifact.persist": "草稿采用",
+    "workflow.accept_result": "工作流结果采用",
+    "ad.experiment.create": "创建投放实验",
+  };
+  return labels[actionKey] ?? actionKey;
+}
+
+/** 把草稿对象序列化为可编辑 JSON 文本；无草稿时返回空串。 */
+function stringifyDraft(draft: unknown) {
+  if (!draft || typeof draft !== "object") {
+    return "";
+  }
+  return JSON.stringify(draft, null, 2);
 }
 
 /** 渲染 Metric 组件，集中展示指标所需的数据、状态和操作入口。 */
@@ -347,10 +426,17 @@ function EmptyWorkspace() { return <main className="flex min-h-screen items-cent
 /** 渲染 AgentServiceError 组件，集中展示Agent服务错误所需的数据、状态和操作入口。 */
 function AgentServiceError() { return <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6"><div className="max-w-lg rounded-md border border-rose-200 bg-white p-8 text-center"><XCircle className="mx-auto h-8 w-8 text-rose-600" /><h1 className="mt-4 text-xl font-semibold">Agent 服务暂不可用</h1><p className="mt-2 text-sm text-slate-500">请求未被伪装为空数据，请检查 API、权限或基础设施状态后重试。</p></div></main>; }
 
-/** 渲染 ResultBanner 组件，集中展示结果提示横幅所需的数据、状态和操作入口。 */
+/** 成功结果标记：BFF 路由在操作成功后写入的中性标识。 */
+const SUCCESS_RESULTS = new Set(["created", "cancelled", "memory-created", "memory-revoked", "approved"]);
+
+/** 渲染结果提示横幅；失败时优先按机器可读错误码给出准确提示。 */
 function ResultBanner({ result }: { result: string }) {
-  const failed = result === "failed";
-  return <div className={`rounded-md border px-4 py-3 text-sm ${failed ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>{failed ? "操作失败，请检查输入和权限。" : "操作已提交，任务状态会持续更新。"}</div>;
+  const succeeded = SUCCESS_RESULTS.has(result);
+  const mapped = describeAgentErrorCode(result);
+  const message = succeeded
+    ? "操作已提交，任务状态会持续更新。"
+    : mapped || "操作失败，请检查输入和权限。";
+  return <div className={`rounded-md border px-4 py-3 text-sm ${succeeded ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-rose-200 bg-rose-50 text-rose-700"}`}>{message}</div>;
 }
 
 /** 处理选择Workspace交互，维护必要状态并把副作用交给受控路由或后端 API。 */

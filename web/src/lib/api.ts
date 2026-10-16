@@ -323,3 +323,43 @@ async function fetchAgentResource<T>(
     throw new AgentApiError("Agent API is unavailable", null);
   }
 }
+
+/** 请求后端获取单次运行详情（含事件时间线）。 */
+export async function getAgentRun(runId: string): Promise<AgentRun | null> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/agent-runs/${runId}`, {
+      headers: await authHeaders(),
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    return response.json();
+  } catch {
+    return null;
+  }
+}
+
+/** 请求后端获取单条审批详情（含剩余有效期与变更预览载荷）。 */
+export async function getAgentApproval(
+  workspaceId: number,
+  approvalId: number,
+): Promise<AgentApproval | null> {
+  return fetchAgentResource<AgentApproval | null>(
+    `/api/v1/workspaces/${workspaceId}/agent/approvals/${approvalId}`,
+    await workspaceAuthHeaders(workspaceId),
+  );
+}
+
+/** 请求后端撤销一条结构化记忆。 */
+export async function revokeAgentMemory(
+  workspaceId: number,
+  memoryId: number,
+): Promise<AgentMemory | null> {
+  return fetchAgentResource<AgentMemory | null>(
+    `/api/v1/workspaces/${workspaceId}/agent/memories/${memoryId}/revoke`,
+    await workspaceAuthHeaders(workspaceId),
+  );
+}

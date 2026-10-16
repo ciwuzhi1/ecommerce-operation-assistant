@@ -29,7 +29,7 @@ import { ProductEditForm } from "@/components/product-edit-form";
 import { ReviewReportEditForm } from "@/components/review-report-edit-form";
 import { SkuCreateForm, SkuInventoryPanel } from "@/components/sku-inventory-forms";
 import { VideoScriptEditForm } from "@/components/video-script-edit-form";
-import { getAdExperimentDashboard, getCurrentUser, getProduct, getStores } from "@/lib/api";
+import { getAdExperimentDashboard, getAgentRuns, getCurrentUser, getProduct, getStores } from "@/lib/api";
 import { getAuthToken } from "@/lib/session";
 import type {
   AdExperiment,
@@ -96,7 +96,7 @@ export default async function ProductDetailPage({ params, searchParams }: Produc
   const [product, adExperimentDashboard, agentRuns, stores, token] = await Promise.all([
     getProduct(id),
     getAdExperimentDashboard(id),
-    Promise.resolve([]),
+    getAgentRuns(id),
     getStores(),
     getAuthToken(),
   ]);

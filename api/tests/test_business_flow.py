@@ -1,6 +1,5 @@
 """业务接口闭环测试；输入与文档中的接口示例一致。"""
 from decimal import Decimal
-import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +14,17 @@ from app.services.bootstrap import ensure_bootstrap_user
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    """内存库 + 模型替身：测试不访问真实模型，也不读取本地 .env 中的密钥。"""
+    from app.services import ad_recommendations, creative_plans, diagnosis, inventory_advice, review
+    from app.services.llm import LLMNotConfiguredError
+
+    def unavailable(*args, **kwargs):
+        raise LLMNotConfiguredError('测试环境：使用规则回退')
+
+    for module in [diagnosis, creative_plans, review, ad_recommendations, inventory_advice]:
+        monkeypatch.setattr(module, 'create_json_chat_completion', unavailable)
+
     engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -79,13 +88,18 @@ def test_competitor_creative_performance_review_flow(client):
         assert len(detail[key]) == 1, key
 
 
-def test_ai_boundary_is_explicit_and_does_not_write(client):
+def test_diagnosis_generation_writes_record_with_source(client):
+    """诊断生成落库并标注来源；未配置模型时降级为规则结果（FR-06/FR-07）。"""
     item = product(client)
     response = client.post(f"/api/v1/products/{item['id']}/diagnoses/generate")
-    assert response.status_code == 501
-    assert '尚未接入' in response.json()['detail']
+    assert response.status_code == 201, response.text
+    diagnosis = response.json()
+    # 测试环境不配置模型密钥，必须走规则回退且不伪造模型来源。
+    assert diagnosis['source'] == 'rules'
+    assert diagnosis['positioning']
+
     detail = client.get(f"/api/v1/products/{item['id']}").json()
-    assert detail['diagnoses'] == []
+    assert len(detail['diagnoses']) == 1
     assert detail['generation_jobs'] == []
 
 
@@ -101,12 +115,10 @@ def test_document_csv_preview_then_commit(client):
     assert len(client.get('/api/v1/products').json()) == 1
 
 
-def test_swagger_and_stage_import_boundary(client):
+def test_swagger_and_authentication_boundary(client):
     assert client.get('/docs').status_code == 200
     spec = client.get('/openapi.json').json()
     assert spec['components']['securitySchemes']['HTTPBearer']['scheme'] == 'bearer'
     assert spec['paths']['/api/v1/products']['post']['security'] == [{'HTTPBearer': []}]
-    assert not any(name.startswith('app.agents') for name in sys.modules)
-    assert 'app.services.llm' not in sys.modules
     client.headers.pop('Authorization')
     assert client.get('/api/v1/products').status_code == 401

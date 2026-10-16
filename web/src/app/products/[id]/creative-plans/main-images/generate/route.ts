@@ -1,2 +1,26 @@
-import { NextResponse } from "next/server";
-export async function POST(request: Request) { return NextResponse.redirect(new URL("/coming-soon", request.url), 303); }
+import { redirect } from "next/navigation";
+
+import { API_BASE_URL } from "@/lib/api";
+import { authHeaders } from "@/lib/session";
+
+type RouteContext = {
+  params: Promise<{ id: string }>;
+};
+
+/** 处理商品/创意plans/主图images/生成请求：读取表单和路径参数，调用后端 API，并按结果响应或重定向。 */
+export async function POST(_request: Request, context: RouteContext) {
+  const { id } = await context.params;
+
+  const response = await fetch(`${API_BASE_URL}/api/v1/products/${id}/creative-plans/main-images/generate`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+
+  if (!response.ok) {
+    redirect(`/products/${id}?tab=main-images&mainImagePlans=failed`);
+  }
+
+  redirect(`/products/${id}?tab=main-images`);
+}
+
+
