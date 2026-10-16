@@ -15,3 +15,31 @@ uploads/
 # Next.js 16 启动时自动生成，不纳入版本管理
 AGENTS.md
 CLAUDE.md
+
+# ---------------------------------------------------------------------------
+# 运行期产物：本地跑 uvicorn / celery 时会生成，不能入库
+# ---------------------------------------------------------------------------
+# Celery Beat 的调度状态文件（worker -B 或独立 beat 都会写）
+celerybeat-schedule*
+celerybeat.pid
+*.pid
+
+# 日志与覆盖率
+*.log
+.coverage
+.coverage.*
+htmlcov/
+
+# 类型检查 / 静态检查缓存
+.mypy_cache/
+.dmypy.json
+
+# 操作系统生成的杂项文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地数据库文件（如误用 SQLite 做临时验证）
+*.db
+*.sqlite
+*.sqlite3
