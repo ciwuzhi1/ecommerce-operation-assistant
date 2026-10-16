@@ -4,6 +4,16 @@ from app.agents.definitions import AgentPolicyError, require_tool_permission
 from app.agents.registry import AGENT_REGISTRY, TOOL_REGISTRY
 from app.models import AgentRiskLevel, UserRole
 
+# 本模块是策略层的对外门面：AgentPolicyError 与 require_tool_permission 从 definitions
+# 再导出，调用方（含测试）统一从这里取。显式声明 __all__ 是为了让静态检查知道
+# 这两个名字是「有意再导出」而非未使用导入，避免被自动清理误删。
+__all__ = [
+    "AgentPolicyError",
+    "PolicyDecision",
+    "authorize_tool",
+    "require_tool_permission",
+]
+
 
 @dataclass(frozen=True)
 class PolicyDecision:

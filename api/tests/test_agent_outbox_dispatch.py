@@ -2,21 +2,17 @@
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.agents.policy import AgentPolicyError, authorize_tool
-from app.agents.registry import (
-    AGENT_REGISTRY, TOOL_REGISTRY, WORKFLOW_REGISTRY, INVENTORY_OPERATIONS_AGENT,
-)
 from app.models import (
-    AgentRun, AgentRunStatus, AgentTask, Base, OutboxEvent, OutboxEventStatus,
+    Base, OutboxEvent, OutboxEventStatus,
     Platform, Product, User, UserRole, Workspace,
 )
 from app.schemas import AgentTaskCreate
 from app.services import outbox
-from app.services.agent_tasks import AgentTaskStateError, create_agent_task
+from app.services.agent_tasks import create_agent_task
 
 
 @pytest.fixture

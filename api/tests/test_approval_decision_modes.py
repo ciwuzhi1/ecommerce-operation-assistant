@@ -18,7 +18,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.agents.contracts import ReviewResumePayload
-from app.api.routes import model_settings as model_settings_route
 from app.api.routes.auth import get_current_user
 from app.core.errors import MODEL_NOT_CONFIGURED
 from app.db.session import get_db
