@@ -1,0 +1,50 @@
+name: ecommerce-operation-assistant
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ecommerce_operation}
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
+    command: ["sh", "-c", "exec redis-server --requirepass \"$${REDIS_PASSWORD}\""]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  agent-checkpoints:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${AGENT_POSTGRES_USER:-agent}
+      POSTGRES_PASSWORD: "${AGENT_POSTGRES_PASSWORD:?Set AGENT_POSTGRES_PASSWORD in .env}"
+      POSTGRES_DB: ${AGENT_POSTGRES_DATABASE:-agent_checkpoints}
+    ports:
+      - "127.0.0.1:${AGENT_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - agent-checkpoint-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AGENT_POSTGRES_USER:-agent} -d ${AGENT_POSTGRES_DATABASE:-agent_checkpoints}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mysql-data:
+  agent-checkpoint-data:

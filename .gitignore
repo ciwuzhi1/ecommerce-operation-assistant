@@ -1,0 +1,17 @@
+.env
+.env.local
+.env*.local
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+node_modules/
+.next/
+uploads/
+*.tar
+*.tar.gz
+
+# Next.js 16 启动时自动生成，不纳入版本管理
+AGENTS.md
+CLAUDE.md

@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f7f8fb;
+  --foreground: #0f172a;
+  --app-font-sans: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, Helvetica, sans-serif;
+  --app-font-mono: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--app-font-sans);
+  --font-mono: var(--app-font-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--app-font-sans);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}

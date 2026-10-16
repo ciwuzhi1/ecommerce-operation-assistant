@@ -1,0 +1,8 @@
+.env
+.env.*
+node_modules
+.next
+out
+.logs
+.next-courseware-*.log
+npm-debug.log*
